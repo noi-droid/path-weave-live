@@ -64,8 +64,7 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
     <fieldset><legend>Video</legend>
       <label class="row"><span>動画を開く</span><input type="file" id="file" accept="video/*,.mp4,.mov,.m4v,.webm"></label>
       <div class="btns"><button id="play" disabled>一時停止</button></div>
-      <label class="row"><span>再生の速さ</span><select id="rate"><option value="0.25">1/4</option><option value="0.5" selected>1/2</option><option value="1">そのまま</option></select></label>
-      <p class="note">人の検出が映像に追いつかないと、人の形と映像が少しずれます。速さを落とすとずれが小さくなります。</p>
+      <label class="row"><span>再生の速さ</span><select id="rate"><option value="0.25">1/4</option><option value="0.5">1/2</option><option value="1" selected>そのまま</option></select></label>
     </fieldset>
 
     <fieldset><legend>Line</legend>
@@ -84,8 +83,10 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
       <label class="row"><span>文字の立つ位置</span><input type="range" id="gndR" min="0" max="100" value="72"><input type="number" id="gnd" min="0" max="100" value="72"></label>
       <p class="note">文字の線が、通りのどの奥行きに張られているかを、地面の高さで決めます。足もとがこの高さより下（手前）にいる人は文字を隠して、上（奥）にいる人は文字の後ろを通ります。</p>
       <label class="row"><span><input type="checkbox" id="showGnd" checked> 地面の高さを表示</span></label>
-      <label class="row"><span><input type="checkbox" id="showPeople"> 人の範囲を色で表示</span></label>
-      <label class="row"><span>見つける人数</span><input type="range" id="numR" min="1" max="10" value="6"><input type="number" id="num" min="1" max="10" value="6"></label>
+      <label class="row"><span><input type="checkbox" id="showPeople"> 動いているものを色で表示</span></label>
+      <label class="row"><span>動きの感度</span><input type="range" id="thrR" min="1" max="100" value="60"><input type="number" id="thr" min="1" max="100" value="60"></label>
+      <div class="btns"><button id="relearn">背景を覚え直す</button></div>
+      <p class="note">カメラが動かないことを前提に、映像の背景を覚えて、そこから変わった部分を「人」として切り出します。動画を開いてから数秒は背景を覚えている途中なので、形が荒れます。車や自転車など、人以外の動くものも同じように扱います。長く立ち止まっている人は、背景になじんでいきます。</p>
     </fieldset>
 
     <fieldset><legend>Text</legend>
@@ -110,21 +111,17 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
 </div>
 
 <script type="module">
-const TV = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0';
-const MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
 const $ = id => document.getElementById(id);
 const cv = $('cv'), ctx = cv.getContext('2d');
 
 // ---------- controls ----------
 const val = {};
-for (const k of ['spd','gnd','num','size','wgt','trk']) {
+for (const k of ['spd','gnd','thr','size','wgt','trk']) {
   const r = $(k + 'R'), n = $(k);
   r.addEventListener('input', () => { n.value = r.value; val[k] = +r.value; });
   n.addEventListener('input', () => { if (n.value !== '') { r.value = n.value; val[k] = +n.value; } });
   val[k] = +n.value;
 }
-$('num').addEventListener('change', () => landmarker && landmarker.setOptions({ numPoses: val.num }));
-$('numR').addEventListener('change', () => landmarker && landmarker.setOptions({ numPoses: val.num }));
 const col = $('col'), colHex = $('colHex');
 col.addEventListener('input', () => colHex.value = col.value.toUpperCase());
 colHex.addEventListener('change', () => { if (/^#[0-9a-f]{6}$/i.test(colHex.value)) col.value = colHex.value; else colHex.value = col.value.toUpperCase(); });
@@ -211,11 +208,10 @@ $('file').addEventListener('change', async e => {
   const oldW = cv.width, oldH = cv.height;
   cv.width = Math.round(video.videoWidth * scale); cv.height = Math.round(video.videoHeight * scale);
   if (line) setLine(line.pts.map(p => ({ x: p.x / oldW * cv.width, y: p.y / oldH * cv.height })));
-  widthCache.clear(); hasVideo = true; people = [];
+  widthCache.clear(); hasVideo = true; people = []; bg = null;
   video.playbackRate = +$('rate').value;
   await video.play().catch(() => {});
   $('play').disabled = false; $('play').textContent = '一時停止';
-  ensureModel();
 });
 $('rate').addEventListener('change', () => video.playbackRate = +$('rate').value);
 $('play').addEventListener('click', () => {
@@ -223,52 +219,59 @@ $('play').addEventListener('click', () => {
 });
 function setHint(t, err) { $('hint').textContent = t; $('hint').classList.toggle('err', !!err); }
 
-// ---------- people ----------
-let landmarker = null, loading = false;
-async function ensureModel() {
-  if (landmarker || loading) return;
-  loading = true; setHint('人を見つける準備をしています…');
-  try {
-    const { FilesetResolver, PoseLandmarker } = await import(TV + '/vision_bundle.mjs');
-    const fs = await FilesetResolver.forVisionTasks(TV + '/wasm');
-    const opts = { baseOptions: { modelAssetPath: MODEL, delegate: 'GPU' }, runningMode: 'VIDEO', numPoses: val.num, minPoseDetectionConfidence: 0.4, minPosePresenceConfidence: 0.4, minTrackingConfidence: 0.4, outputSegmentationMasks: true };
-    try { landmarker = await PoseLandmarker.createFromOptions(fs, opts); }
-    catch (e) { opts.baseOptions.delegate = 'CPU'; landmarker = await PoseLandmarker.createFromOptions(fs, opts); }
-    setHint('映像の上をドラッグすると、文字を張る線を引き直せます。');
-  } catch (err) {
-    setHint('人を見つける部品を読み込めませんでした。ネットにつながっているか確認してください。', true);
-  }
-  loading = false;
-}
-
-// detection runs on a smaller copy of the frame
-const PW = 640;
-const proc = document.createElement('canvas'), pctx = proc.getContext('2d');
+// ---------- people: what differs from the learned background ----------
+const PW = 320;
+const proc = document.createElement('canvas'), pctx = proc.getContext('2d', { willReadFrequently: true });
 const mk = document.createElement('canvas'), mctx = mk.getContext('2d');
-let people = [], lastT = -1, lastStamp = 0;
-const FEET = [27, 28, 29, 30, 31, 32];
+let bg = null, frames = 0, people = [], lastT = -1, pw = 0, ph = 0;
+$('relearn').addEventListener('click', () => { bg = null; });
 
 function detect() {
-  if (!landmarker || !hasVideo || video.readyState < 2) return;
-  if (video.currentTime === lastT) return;
+  if (!hasVideo || video.readyState < 2 || video.currentTime === lastT) return;
   lastT = video.currentTime;
-  proc.width = PW; proc.height = Math.round(PW * video.videoHeight / video.videoWidth);
-  pctx.drawImage(video, 0, 0, proc.width, proc.height);
-  const stamp = Math.max(lastStamp + 1, performance.now()); lastStamp = stamp;
-  try {
-    landmarker.detectForVideo(proc, stamp, res => {
-      const out = [];
-      (res.landmarks || []).forEach((lm, k) => {
-        const m = res.segmentationMasks && res.segmentationMasks[k]; if (!m) return;
-        const f = m.getAsFloat32Array(), w = m.width, h = m.height;
-        const alpha = new Uint8ClampedArray(w * h);
-        for (let i = 0; i < f.length; i++) alpha[i] = f[i] > 0.5 ? 255 : 0;
-        let fy = 0; for (const j of FEET) fy = Math.max(fy, lm[j].y);
-        out.push({ alpha, w, h, footY: fy });
-      });
-      people = out;
-    });
-  } catch (err) {}
+  pw = PW; ph = Math.round(PW * video.videoHeight / video.videoWidth);
+  proc.width = pw; proc.height = ph;
+  pctx.drawImage(video, 0, 0, pw, ph);
+  const px = pctx.getImageData(0, 0, pw, ph).data, n = pw * ph;
+  if (!bg || bg.length !== n * 3) { bg = new Float32Array(n * 3); for (let i = 0; i < n; i++) { bg[i*3] = px[i*4]; bg[i*3+1] = px[i*4+1]; bg[i*3+2] = px[i*4+2]; } frames = 0; }
+  frames++;
+  // background follows the frame slowly (fast for the first seconds), like a running median
+  const step = frames < 90 ? 6 : 1.2;
+  const thr = 12 + (100 - val.thr) * 0.9;
+  const fg = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    let d = 0;
+    for (let c = 0; c < 3; c++) {
+      const v = px[i*4+c], k = i*3+c, diff = v - bg[k];
+      d = Math.max(d, Math.abs(diff));
+      bg[k] += diff > step ? step : diff < -step ? -step : diff;
+    }
+    fg[i] = d > thr ? 1 : 0;
+  }
+  // tidy the shapes: close small holes, drop specks
+  const tidy = (src, need) => { const out = new Uint8Array(n); for (let y = 1; y < ph - 1; y++) for (let x = 1; x < pw - 1; x++) { let c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) c += src[(y+dy)*pw + x+dx]; out[y*pw+x] = c >= need ? 1 : 0; } return out; };
+  const m = tidy(tidy(tidy(fg, 3), 3), 5);
+  // separate shapes; each one gets its lowest point as "feet"
+  const lab = new Int32Array(n).fill(-1), out = [], stack = [];
+  const minArea = n * 0.0012;
+  for (let i = 0; i < n; i++) {
+    if (!m[i] || lab[i] >= 0) continue;
+    const id = out.length, pix = []; let maxY = 0;
+    lab[i] = id; stack.push(i);
+    while (stack.length) {
+      const j = stack.pop(); pix.push(j);
+      const y = (j / pw) | 0, x = j - y * pw; if (y > maxY) maxY = y;
+      if (x > 0 && m[j-1] && lab[j-1] < 0) { lab[j-1] = id; stack.push(j-1); }
+      if (x < pw-1 && m[j+1] && lab[j+1] < 0) { lab[j+1] = id; stack.push(j+1); }
+      if (y > 0 && m[j-pw] && lab[j-pw] < 0) { lab[j-pw] = id; stack.push(j-pw); }
+      if (y < ph-1 && m[j+pw] && lab[j+pw] < 0) { lab[j+pw] = id; stack.push(j+pw); }
+    }
+    out.push({ pix, footY: (maxY + 1) / ph, big: pix.length >= minArea });
+  }
+  people = frames < 20 ? [] : out.filter(p => p.big).map(p => {
+    const alpha = new Uint8ClampedArray(n); for (const j of p.pix) alpha[j] = 255;
+    return { alpha, w: pw, h: ph, footY: p.footY };
+  });
 }
 
 // one mask image holding the chosen people
