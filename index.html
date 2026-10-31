@@ -78,7 +78,11 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
         <option value="pinch">人差し指から人差し指へ</option>
       </select></label>
       <p class="note" id="shapenote"></p>
-      <label class="row"><span>たるみ</span><input type="range" id="sagR" min="0" max="60" value="8"><input type="number" id="sag" min="0" max="100" value="8"></label>
+      <label class="row"><span>糸の長さ</span><input type="range" id="lenR" min="100" max="250" value="115"><input type="number" id="len" min="100" max="400" value="115"></label>
+      <label class="row"><span>糸の重さ</span><input type="range" id="grvR" min="0" max="100" value="40"><input type="number" id="grv" min="0" max="200" value="40"></label>
+      <label class="row"><span>指の上のすべりやすさ</span><input type="range" id="slpR" min="0" max="100" value="40"><input type="number" id="slp" min="0" max="100" value="40"></label>
+      <div class="btns"><button id="rehook">糸をかけ直す</button></div>
+      <p class="note">糸の長さは、かけたときの指と指の距離に対する割合です。指を広げると糸が張って、近づけるとたるみます。張りきったあとは、糸が少し伸びます。</p>
       <label class="row"><span>流れる速さ</span><input type="range" id="spdR" min="-12" max="12" value="2" step="0.5"><input type="number" id="spd" min="-40" max="40" value="2" step="0.5"></label>
       <label class="row"><span>動きのなめらかさ</span><input type="range" id="smR" min="0" max="90" value="45"><input type="number" id="sm" min="0" max="95" value="45"></label>
     </fieldset>
@@ -98,7 +102,7 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
     </fieldset>
 
     <fieldset><legend>Front / Back</legend>
-      <label class="row"><span>指との重なり</span><select id="mode"><option value="alt">指を横切るたびに交互</option><option value="back">いつも指の後ろ</option><option value="front">いつも指の手前</option></select></label>
+      <label class="row"><span>指との重なり</span><select id="mode"><option value="wrap">指に巻きつく</option><option value="alt">指を横切るたびに交互</option><option value="back">いつも指の後ろ</option><option value="front">いつも指の手前</option></select></label>
       <label class="row"><span>指の太さ</span><input type="range" id="thkR" min="40" max="220" value="100"><input type="number" id="thk" min="20" max="400" value="100"></label>
       <p class="note">手の形は、指の関節の点を太い線でつないで作っています。文字が指からはみ出して見えるときや、指の中に食い込んで見えるときは「指の太さ」を合わせてください。</p>
     </fieldset>
@@ -119,7 +123,7 @@ const HANDS_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${HANDS_VER}/`
 
 // ---------- controls: range + number pairs ----------
 const val = {};
-for (const k of ['sag','spd','sm','size','wgt','trk','thk']) {
+for (const k of ['len','grv','slp','spd','sm','size','wgt','trk','thk']) {
   const r = $(k + 'R'), n = $(k);
   const set = v => { val[k] = +v; };
   r.addEventListener('input', () => { n.value = r.value; set(r.value); });
@@ -136,7 +140,8 @@ const SHAPE_NOTES = {
   pinch: '左右の人差し指のあいだに1本の糸を張ります。片手だけのときは、親指と人差し指のあいだに張ります。'
 };
 const updShapeNote = () => $('shapenote').textContent = SHAPE_NOTES[$('shape').value];
-$('shape').addEventListener('change', updShapeNote); updShapeNote();
+$('shape').addEventListener('change', () => { updShapeNote(); resetRope(); }); updShapeNote();
+$('rehook').addEventListener('click', resetRope);
 
 // ---------- font ----------
 let family = '"Helvetica Neue",Helvetica,Arial,"Hiragino Sans",sans-serif';
@@ -177,38 +182,86 @@ function demoHands(t) {
 }
 
 // ---------- string path ----------
-function anchorsFor(hands) {
+// which fingers the string is hooked on: [hand, fingertip landmark]
+function hooksFor(n) {
   const shape = $('shape').value;
-  if (hands.length >= 2) {
-    const [A, B] = hands;
-    if (shape === 'cradle') return { pts: [A[4], B[4], A[12], B[20], A[20], B[12]], closed: true };
-    if (shape === 'tips') return { pts: [...TIPS.map(i => A[i]), ...TIPS.slice().reverse().map(i => B[i])], closed: true };
-    return { pts: [A[8], B[8]], closed: false };
+  if (n >= 2) {
+    if (shape === 'cradle') return { refs: [[0,4],[1,4],[0,12],[1,20],[0,20],[1,12]], closed: true };
+    if (shape === 'tips') return { refs: [...TIPS.map(i => [0,i]), ...TIPS.slice().reverse().map(i => [1,i])], closed: true };
+    return { refs: [[0,8],[1,8]], closed: false };
   }
-  if (hands.length === 1) {
-    const A = hands[0];
-    if (shape === 'pinch') return { pts: [A[4], A[8]], closed: false };
-    return { pts: TIPS.map(i => A[i]), closed: true };
+  if (n === 1) {
+    if (shape === 'pinch') return { refs: [[0,4],[0,8]], closed: false };
+    return { refs: TIPS.map(i => [0,i]), closed: true };
   }
   return null;
 }
+// the string sits on the finger a little below the tip, not on the tip itself
+const pegPoint = (h, i) => ({ x: h[i].x + (h[i-1].x - h[i].x) * 0.35, y: h[i].y + (h[i-1].y - h[i].y) * 0.35 });
 
-function buildPath(an) {
-  const a = an.pts, n = a.length, segs = an.closed ? n : n - 1, sag = val.sag / 100, pts = [];
-  for (let i = 0; i < segs; i++) {
-    const p = a[i], q = a[(i + 1) % n];
-    const len = Math.hypot(q.x - p.x, q.y - p.y);
-    const cx = (p.x + q.x) / 2, cy = (p.y + q.y) / 2 + sag * len;   // the string droops downward
-    const k = Math.max(2, Math.ceil(len / 3));
-    for (let j = 0; j < k; j++) {
-      const t = j / k, u = 1 - t;
-      pts.push({ x: u*u*p.x + 2*u*t*cx + t*t*q.x, y: u*u*p.y + 2*u*t*cy + t*t*q.y });
+// ---------- the string: fixed length, hooked on fingers, falls with gravity ----------
+const NP = 26;                                  // free points per stretch between two fingers
+let rope = null;
+function resetRope() { rope = null; }
+function stepRope(hands) {
+  const hk = hooksFor(hands.length);
+  if (!hk) { rope = null; return null; }
+  const key = $('shape').value + '|' + hands.length;
+  const pegs = hk.refs.map(([h, i]) => pegPoint(hands[h], i));
+  const P = pegs.length, S = hk.closed ? P : P - 1;
+  const chord = k => { const a = pegs[k], b = pegs[(k + 1) % P]; return Math.hypot(b.x - a.x, b.y - a.y); };
+  if (!rope || rope.key !== key) {
+    const base = Array.from({ length: S }, (_, k) => chord(k)), sum = base.reduce((a, b) => a + b, 0) || 1;
+    rope = { key, base: sum, segs: base.map((c, k) => {
+      const a = pegs[k], b = pegs[(k + 1) % P], pts = [];
+      for (let j = 1; j <= NP; j++) { const t = j / (NP + 1); const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t; pts.push({ x, y, ox: x, oy: y }); }
+      return { l: c * val.len / 100, pts };
+    }) };
+  }
+  const segs = rope.segs, chords = segs.map((_, k) => chord(k));
+  const L0 = rope.base * val.len / 100, csum = chords.reduce((a, b) => a + b, 0);
+  // total length: the set length, stretched only while the fingers pull it past that
+  let tot = segs.reduce((a, s) => a + s.l, 0);
+  const want = Math.max(L0, csum * 1.01);
+  if (Math.abs(tot - want) > 0.5) { const f = want / tot; segs.forEach(s => s.l *= f); }
+  // sliding over each finger: length moves toward the tighter side
+  const slip = val.slp / 100 * 0.12;
+  const first = hk.closed ? 0 : 1, last = hk.closed ? P - 1 : P - 2;
+  for (let j = first; j <= last; j++) {
+    const a = segs[(j - 1 + S) % S], b = segs[j % S];
+    if (!a || !b || a === b) continue;
+    const ta = chords[(j - 1 + S) % S] / a.l, tb = chords[j % S] / b.l;
+    let d = slip * (tb - ta) * Math.min(a.l, b.l);
+    d = Math.max(-b.l * 0.2, Math.min(a.l * 0.2, d));
+    if (a.l - d > 4 && b.l + d > 4) { a.l -= d; b.l += d; }
+  }
+  // gravity + inertia
+  const g = val.grv / 100 * 0.9 * cv.height / 720;
+  for (const s of segs) for (const p of s.pts) {
+    const vx = (p.x - p.ox) * 0.97, vy = (p.y - p.oy) * 0.97;
+    p.ox = p.x; p.oy = p.y; p.x += vx; p.y += vy + g;
+  }
+  // a string can go slack but cannot stretch: only pull points together when too far apart
+  for (let it = 0; it < 24; it++) {
+    for (let k = 0; k < S; k++) {
+      const s = segs[k], a = pegs[k], b = pegs[(k + 1) % P], r = s.l / (NP + 1);
+      const node = j => j === 0 ? a : j === NP + 1 ? b : s.pts[j - 1];
+      for (let j = 0; j <= NP; j++) {
+        const p = node(j), q = node(j + 1), dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy);
+        if (d <= r || d === 0) continue;
+        const e = (d - r) / d, pf = j > 0, qf = j < NP;
+        const wp = pf && qf ? 0.5 : pf ? 1 : 0, wq = pf && qf ? 0.5 : qf ? 1 : 0;
+        p.x += dx * e * wp; p.y += dy * e * wp; q.x -= dx * e * wq; q.y -= dy * e * wq;
+      }
     }
   }
-  pts.push(an.closed ? { ...a[0] } : { ...a[n - 1] });
+  // path through the fingers and the free points, remembering where each finger sits on it
+  const pts = [], pegIdx = [];
+  for (let k = 0; k < S; k++) { pegIdx.push(pts.length); pts.push({ x: pegs[k].x, y: pegs[k].y }); for (const p of segs[k].pts) pts.push({ x: p.x, y: p.y }); }
+  pegIdx.push(pts.length); pts.push(hk.closed ? { ...pegs[0] } : { ...pegs[P - 1] });
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i-1] + Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y));
-  return { pts, cum, L: cum[cum.length - 1] };
+  return { pts, cum, L: cum[cum.length - 1], pegIdx };
 }
 
 function idxAt(cum, s) { let lo = 0, hi = cum.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (cum[m] <= s) lo = m; else hi = m - 1; } return lo; }
@@ -272,7 +325,17 @@ function layoutGlyphs(path, run) {
     const ch = chars[ci], w = adv(ch), c = pos + w / 2;
     if (c >= 0 && c <= L && ch !== ' ') {
       const p = pointAt(path, c), r = run[p.i];
-      const back = r >= 0 && (mode === 'back' || (mode === 'alt' && r % 2 === 0));
+      let back = false;
+      if (r >= 0) {
+        if (mode === 'back') back = true;
+        else if (mode === 'alt') back = r % 2 === 0;
+        else if (mode === 'wrap') {
+          // over a hooked finger: the string comes in on the palm side and leaves round the back
+          let best = -1, bd = Infinity;
+          for (const pi of path.pegIdx) if (run[pi] === r && Math.abs(pi - p.i) < bd) { bd = Math.abs(pi - p.i); best = pi; }
+          back = best >= 0 && p.i >= best;
+        }
+      }
       out.push({ ch, x: p.x, y: p.y, a: p.a, w, back });
     }
     pos += w; ci++; used++;
@@ -318,13 +381,13 @@ async function startCam() {
   try { await ensureModel(); }
   catch (err) { hint.textContent = '手の検出の部品を読み込めませんでした。ネットにつながっているか確認してください。'; hint.classList.add('err'); }
   cv.width = video.videoWidth || 1280; cv.height = video.videoHeight || 720; widthCache.clear();
-  live = true; smooth = [];
+  live = true; smooth = []; resetRope();
   $('cam').textContent = 'カメラを止める';
   hint.textContent = '両手をカメラに向けて広げてください。指先に糸がかかります。';
 }
 function stopCam() {
   if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
-  video.srcObject = null; live = false; lastRes = []; smooth = [];
+  video.srcObject = null; live = false; lastRes = []; smooth = []; resetRope();
   cv.width = 1280; cv.height = 720; widthCache.clear();
   $('cam').textContent = 'カメラを始める';
   $('hint').textContent = '今は見本の手で動いています。「カメラを始める」を押すと、自分の手の指先に糸がかかります。';
@@ -396,9 +459,9 @@ function frame() {
   drawBackground();
   drawMask(hands);
   if (!live) drawHandsOver();                   // demo hands need a visible body
-  const an = anchorsFor(hands);
-  if (an) {
-    const path = buildPath(an), run = crossings(path), gs = layoutGlyphs(path, run);
+  const path = stepRope(hands);
+  if (path) {
+    const run = crossings(path), gs = layoutGlyphs(path, run);
     drawGlyphs(gs, true);
     drawHandsOver();
     drawGlyphs(gs, false);
