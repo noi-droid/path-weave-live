@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Path Weave Live</title>
+<style>
+/* layout: camera stage on the left, a narrow control column on the right; stacks on phones (same system as Path Weave) */
+:root{--bg:#eceae4;--panel:#f7f6f2;--fg:#17181a;--mute:#6a6c70;--line:#cfccc3;--accent:#1f4fd8;--accent-fg:#fff;
+ --sans:"Helvetica Neue",Helvetica,Arial,"Hiragino Sans","Yu Gothic",sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141516;--panel:#1d1e20;--fg:#ecebe7;--mute:#9a9b9e;--line:#34363a;--accent:#7fa2ff;--accent-fg:#0d0f14;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#141516;--panel:#1d1e20;--fg:#ecebe7;--mute:#9a9b9e;--line:#34363a;--accent:#7fa2ff;--accent-fg:#0d0f14;color-scheme:dark}
+*{box-sizing:border-box}
+html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;line-height:1.5;padding-block:16px;
+ padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+[hidden]{display:none!important}
+.wrap{display:flex;flex-wrap:wrap;gap:20px;max-width:1280px;margin:0 auto;align-items:flex-start}
+.stage{flex:1 1 480px;min-width:0;max-width:820px}
+.stage canvas{display:block;width:100%;height:auto;background:#000;touch-action:none}
+.hint{color:var(--mute);font-size:12px;margin:8px 0 0}
+.hint.err{color:#c0392b}
+.side{flex:1 1 280px;min-width:0;max-width:400px;display:flex;flex-direction:column;gap:16px}
+h1{font-size:15px;font-weight:600;letter-spacing:.02em;margin:0}
+fieldset{border:0;border-top:1px solid var(--line);padding:12px 0 0;margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
+legend{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);padding:0 8px 0 0}
+label.row{display:flex;align-items:center;gap:8px;justify-content:space-between}
+label.row span{flex:0 0 auto}
+textarea,input[type=number],select{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:6px 8px}
+textarea{width:100%;min-height:70px;resize:vertical;font-size:16px}
+input[type=number]{width:84px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+input[type=range]{flex:1 1 80px;min-width:0;accent-color:var(--accent)}
+input[type=file]{min-width:0;max-width:60%}
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+button,a.btn{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:7px 12px;cursor:pointer;text-decoration:none}
+button.primary,a.btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.note{color:var(--mute);font-size:12px;margin:0}
+.colrow{display:flex;gap:6px;align-items:center}
+.colrow input[type=color]{width:40px;height:32px;padding:2px;border:1px solid var(--line);border-radius:3px;background:var(--panel);cursor:pointer}
+.colrow input[type=text]{width:84px;font:inherit;font-family:var(--mono);color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:6px 8px;text-transform:uppercase}
+#shot,#vid{max-width:100%;width:100%;border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="stage">
+    <canvas id="cv" width="1280" height="720" aria-label="手の映像と、指にかけた糸に沿って流れる文字"></canvas>
+    <p class="hint" id="hint">今は見本の手で動いています。「カメラを始める」を押すと、自分の手の指先に糸がかかります。</p>
+    <div id="shotbox" hidden>
+      <img id="shot" alt="書き出した画像">
+      <div class="btns" style="margin-top:8px"><a class="btn primary" id="shotdl" download="path-weave-live.png">画像を保存</a></div>
+    </div>
+    <div id="recbox" hidden>
+      <video id="vid" controls playsinline muted loop></video>
+      <div class="btns" style="margin-top:8px"><a class="btn primary" id="viddl" download="path-weave-live.webm">動画を保存</a></div>
+    </div>
+  </div>
+
+  <div class="side">
+    <h1>Path Weave Live</h1>
+
+    <fieldset><legend>Camera</legend>
+      <div class="btns">
+        <button class="primary" id="cam">カメラを始める</button>
+        <button id="facing">外側のカメラに切り替える</button>
+      </div>
+      <label class="row"><span><input type="checkbox" id="mirror" checked> 鏡のように左右を反転する</span></label>
+      <label class="row"><span><input type="checkbox" id="dots"> 手の点を表示</span></label>
+      <label class="row"><span><input type="checkbox" id="showLine"> 糸の線を表示</span></label>
+    </fieldset>
+
+    <fieldset><legend>String</legend>
+      <label class="row"><span>糸のかけ方</span><select id="shape">
+        <option value="cradle">あやとりのはじめの形</option>
+        <option value="tips">指先を順にめぐる</option>
+        <option value="pinch">人差し指から人差し指へ</option>
+      </select></label>
+      <p class="note" id="shapenote"></p>
+      <label class="row"><span>たるみ</span><input type="range" id="sagR" min="0" max="60" value="8"><input type="number" id="sag" min="0" max="100" value="8"></label>
+      <label class="row"><span>流れる速さ</span><input type="range" id="spdR" min="-12" max="12" value="2" step="0.5"><input type="number" id="spd" min="-40" max="40" value="2" step="0.5"></label>
+      <label class="row"><span>動きのなめらかさ</span><input type="range" id="smR" min="0" max="90" value="45"><input type="number" id="sm" min="0" max="95" value="45"></label>
+    </fieldset>
+
+    <fieldset><legend>Text</legend>
+      <textarea id="txt" spellcheck="false">WE ARE MORE CONNECTED THAN EVER, YET FEEL AND ACT MORE DISCONNECTED. </textarea>
+      <label class="row"><span><input type="checkbox" id="rep" checked> 糸の端から端まで繰り返す</span></label>
+    </fieldset>
+
+    <fieldset><legend>Type</legend>
+      <label class="row"><span>サイズ</span><input type="range" id="sizeR" min="10" max="160" value="30"><input type="number" id="size" min="6" max="400" value="30"></label>
+      <label class="row"><span>太さ</span><input type="range" id="wgtR" min="1" max="1000" value="400"><input type="number" id="wgt" min="1" max="1000" value="400"></label>
+      <label class="row"><span>字間</span><input type="range" id="trkR" min="-10" max="60" value="2"><input type="number" id="trk" min="-20" max="200" value="2"></label>
+      <label class="row"><span>色</span><span class="colrow"><input type="color" id="col" value="#ffffff" aria-label="文字の色"><input type="text" id="colHex" value="#FFFFFF" maxlength="7" spellcheck="false" aria-label="文字の色（16進数）"></span></label>
+      <label class="row"><span>書体ファイル</span><input type="file" id="font" accept=".ttf,.otf,.woff,.woff2"></label>
+      <p class="note" id="fontnote">書体を読み込むまでは、端末のサンセリフで表示します。</p>
+    </fieldset>
+
+    <fieldset><legend>Front / Back</legend>
+      <label class="row"><span>指との重なり</span><select id="mode"><option value="alt">指を横切るたびに交互</option><option value="back">いつも指の後ろ</option><option value="front">いつも指の手前</option></select></label>
+      <label class="row"><span>指の太さ</span><input type="range" id="thkR" min="40" max="220" value="100"><input type="number" id="thk" min="20" max="400" value="100"></label>
+      <p class="note">手の形は、指の関節の点を太い線でつないで作っています。文字が指からはみ出して見えるときや、指の中に食い込んで見えるときは「指の太さ」を合わせてください。</p>
+    </fieldset>
+
+    <fieldset><legend>Output</legend>
+      <div class="btns"><button class="primary" id="rec" aria-pressed="false">録画を始める</button><button id="save">画像にする</button></div>
+      <p class="note" id="recnote">点や線の表示は、オンにしていると絵と録画にも入ります。</p>
+    </fieldset>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const HANDS_VER = '0.4.1675469240';
+const HANDS_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${HANDS_VER}/`;
+
+// ---------- controls: range + number pairs ----------
+const val = {};
+for (const k of ['sag','spd','sm','size','wgt','trk','thk']) {
+  const r = $(k + 'R'), n = $(k);
+  const set = v => { val[k] = +v; };
+  r.addEventListener('input', () => { n.value = r.value; set(r.value); });
+  n.addEventListener('input', () => { if (n.value !== '') { r.value = n.value; set(n.value); } });
+  set(n.value);
+}
+const col = $('col'), colHex = $('colHex');
+col.addEventListener('input', () => colHex.value = col.value.toUpperCase());
+colHex.addEventListener('change', () => { if (/^#[0-9a-f]{6}$/i.test(colHex.value)) col.value = colHex.value; else colHex.value = col.value.toUpperCase(); });
+
+const SHAPE_NOTES = {
+  cradle: '両手の親指と小指に輪をかけて、中指でそれぞれ反対の手のひら側の糸をすくった形です。片手だけのときは、その手の指先を順にめぐります。',
+  tips: '左の手の親指から小指へ、右の手の小指から親指へとめぐって、輪に戻ります。',
+  pinch: '左右の人差し指のあいだに1本の糸を張ります。片手だけのときは、親指と人差し指のあいだに張ります。'
+};
+const updShapeNote = () => $('shapenote').textContent = SHAPE_NOTES[$('shape').value];
+$('shape').addEventListener('change', updShapeNote); updShapeNote();
+
+// ---------- font ----------
+let family = '"Helvetica Neue",Helvetica,Arial,"Hiragino Sans",sans-serif';
+$('font').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const ff = new FontFace('PWUser', await f.arrayBuffer(), { weight: '1 1000' });
+    await ff.load(); document.fonts.add(ff);
+    family = '"PWUser",' + family; widthCache.clear();
+    $('fontnote').textContent = f.name + ' を使っています。';
+  } catch (err) { $('fontnote').textContent = 'この書体ファイルは読み込めませんでした。ttf / otf / woff / woff2 を選んでください。'; }
+});
+
+// ---------- hand geometry ----------
+const TIPS = [4, 8, 12, 16, 20];
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const PALM = [0,1,2,5,9,13,17];
+// a right hand, palm towards the camera, fingers up; units = wrist→middle tip length
+const TEMPLATE = [[0,0],[-.15,-.08],[-.28,-.2],[-.38,-.32],[-.46,-.42],[-.12,-.45],[-.14,-.62],[-.15,-.74],[-.16,-.85],[0,-.47],[0,-.66],[0,-.79],[0,-.9],[.11,-.44],[.13,-.61],[.14,-.73],[.15,-.83],[.21,-.38],[.25,-.52],[.27,-.61],[.29,-.7]];
+
+function demoHands(t) {
+  const W = cv.width, H = cv.height, out = [];
+  for (const side of [-1, 1]) {
+    const sx = side;                      // -1 = screen-left hand (mirror of template)
+    const cx = W / 2 + side * W * (0.25 + 0.03 * Math.sin(t * 0.7));
+    const cy = H * 0.93;
+    const s = H * 0.72;
+    const rot = side * (0.1 + 0.08 * Math.sin(t * 0.9 + side));
+    const curl = 0.06 * Math.sin(t * 1.3 + side * 2);
+    out.push(TEMPLATE.map(([x, y], i) => {
+      let px = x * sx, py = y;            // palm faces camera: thumbs point inward
+      if (i % 4 === 0 && i > 4) py += curl * (i === 8 || i === 16 ? 1 : -1);
+      const rx = px * Math.cos(rot) - py * Math.sin(rot), ry = px * Math.sin(rot) + py * Math.cos(rot);
+      return { x: cx + rx * s, y: cy + ry * s };
+    }));
+  }
+  return out;
+}
+
+// ---------- string path ----------
+function anchorsFor(hands) {
+  const shape = $('shape').value;
+  if (hands.length >= 2) {
+    const [A, B] = hands;
+    if (shape === 'cradle') return { pts: [A[4], B[4], A[12], B[20], A[20], B[12]], closed: true };
+    if (shape === 'tips') return { pts: [...TIPS.map(i => A[i]), ...TIPS.slice().reverse().map(i => B[i])], closed: true };
+    return { pts: [A[8], B[8]], closed: false };
+  }
+  if (hands.length === 1) {
+    const A = hands[0];
+    if (shape === 'pinch') return { pts: [A[4], A[8]], closed: false };
+    return { pts: TIPS.map(i => A[i]), closed: true };
+  }
+  return null;
+}
+
+function buildPath(an) {
+  const a = an.pts, n = a.length, segs = an.closed ? n : n - 1, sag = val.sag / 100, pts = [];
+  for (let i = 0; i < segs; i++) {
+    const p = a[i], q = a[(i + 1) % n];
+    const len = Math.hypot(q.x - p.x, q.y - p.y);
+    const cx = (p.x + q.x) / 2, cy = (p.y + q.y) / 2 + sag * len;   // the string droops downward
+    const k = Math.max(2, Math.ceil(len / 3));
+    for (let j = 0; j < k; j++) {
+      const t = j / k, u = 1 - t;
+      pts.push({ x: u*u*p.x + 2*u*t*cx + t*t*q.x, y: u*u*p.y + 2*u*t*cy + t*t*q.y });
+    }
+  }
+  pts.push(an.closed ? { ...a[0] } : { ...a[n - 1] });
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i-1] + Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y));
+  return { pts, cum, L: cum[cum.length - 1] };
+}
+
+function idxAt(cum, s) { let lo = 0, hi = cum.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (cum[m] <= s) lo = m; else hi = m - 1; } return lo; }
+function pointAt(path, s) {
+  const { pts, cum } = path, i = Math.min(idxAt(cum, s), pts.length - 2);
+  const seg = cum[i+1] - cum[i] || 1, t = (s - cum[i]) / seg;
+  const p = pts[i], q = pts[i+1];
+  return { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, a: Math.atan2(q.y - p.y, q.x - p.x), i };
+}
+
+// ---------- hand mask (low-res) ----------
+const MS = 4;                                   // mask is 1/4 of the canvas
+const mk = document.createElement('canvas'), mctx = mk.getContext('2d', { willReadFrequently: true });
+let mData = null;
+function drawMask(hands) {
+  mk.width = Math.ceil(cv.width / MS); mk.height = Math.ceil(cv.height / MS);
+  mctx.clearRect(0, 0, mk.width, mk.height);
+  mctx.fillStyle = mctx.strokeStyle = '#fff'; mctx.lineCap = mctx.lineJoin = 'round';
+  for (const h of hands) {
+    const P = h.map(p => ({ x: p.x / MS, y: p.y / MS }));
+    const palm = Math.hypot(P[9].x - P[0].x, P[9].y - P[0].y);
+    mctx.beginPath(); PALM.forEach((k, j) => j ? mctx.lineTo(P[k].x, P[k].y) : mctx.moveTo(P[k].x, P[k].y)); mctx.closePath(); mctx.fill();
+    mctx.lineWidth = palm * 0.24 * val.thk / 100;
+    mctx.beginPath(); for (const [a, b] of BONES) { mctx.moveTo(P[a].x, P[a].y); mctx.lineTo(P[b].x, P[b].y); } mctx.stroke();
+  }
+  mData = mctx.getImageData(0, 0, mk.width, mk.height).data;
+}
+const inHand = (x, y) => { const mx = x / MS | 0, my = y / MS | 0; if (mx < 0 || my < 0 || mx >= mk.width || my >= mk.height) return false; return mData[(my * mk.width + mx) * 4 + 3] > 127; };
+
+// which stretches of the string lie over a finger, numbered in order along the string
+function crossings(path) {
+  const n = path.pts.length, run = new Int32Array(n).fill(-1), GAP = 14;
+  let id = -1, lastIn = -Infinity;
+  for (let i = 0; i < n; i++) {
+    if (inHand(path.pts[i].x, path.pts[i].y)) {
+      if (path.cum[i] - lastIn > GAP) id++;
+      run[i] = id; lastIn = path.cum[i];
+    }
+  }
+  return run;
+}
+
+// ---------- text along the string ----------
+const widthCache = new Map();
+const fontStr = () => `${val.wgt} ${val.size}px ${family}`;
+function adv(ch) { const k = fontStr() + '|' + ch; let w = widthCache.get(k); if (w === undefined) { w = ctx.measureText(ch).width; widthCache.set(k, w); } return w + val.trk; }
+
+let flow = 0;
+function layoutGlyphs(path, run) {
+  const chars = [...$('txt').value.replace(/\n/g, ' ')], out = [];
+  if (!chars.length || path.L < 2) return out;
+  ctx.font = fontStr();
+  const W = chars.reduce((s, c) => s + adv(c), 0);
+  if (W <= 0) return out;
+  const rep = $('rep').checked, L = path.L, mode = $('mode').value;
+  let pos;
+  if (rep) pos = ((flow % W) + W) % W - W;
+  else { pos = ((flow % (L + W)) + (L + W)) % (L + W); if (pos > L) pos -= L + W; }
+  let ci = 0, used = 0;
+  while (pos < L) {
+    const ch = chars[ci], w = adv(ch), c = pos + w / 2;
+    if (c >= 0 && c <= L && ch !== ' ') {
+      const p = pointAt(path, c), r = run[p.i];
+      const back = r >= 0 && (mode === 'back' || (mode === 'alt' && r % 2 === 0));
+      out.push({ ch, x: p.x, y: p.y, a: p.a, w, back });
+    }
+    pos += w; ci++; used++;
+    if (ci >= chars.length) { ci = 0; if (!rep) break; }
+    if (used > 20000) break;
+  }
+  return out;
+}
+function drawGlyphs(gs, back) {
+  ctx.font = fontStr(); ctx.fillStyle = col.value; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  for (const g of gs) if (g.back === back) {
+    ctx.setTransform(1, 0, 0, 1, g.x, g.y); ctx.rotate(g.a); ctx.fillText(g.ch, -val.trk / 2, 0);
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+// ---------- camera + hand tracking ----------
+const video = document.createElement('video'); video.playsInline = true; video.muted = true;
+let live = false, facing = 'user', handsModel = null, busy = false, lastRes = [], smooth = [];
+
+function loadScript(src) { return new Promise((ok, ng) => { const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous'; s.onload = ok; s.onerror = () => ng(new Error('load ' + src)); document.head.appendChild(s); }); }
+async function ensureModel() {
+  if (handsModel) return;
+  await loadScript(HANDS_BASE + 'hands.js');
+  handsModel = new Hands({ locateFile: f => HANDS_BASE + f });
+  handsModel.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+  handsModel.onResults(r => { lastRes = r.multiHandLandmarks || []; });
+  await handsModel.initialize();
+}
+async function startCam() {
+  const hint = $('hint'); hint.classList.remove('err');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    hint.textContent = 'このブラウザではカメラが使えません。Chrome か Safari で、このファイルを開いてください。'; hint.classList.add('err'); return;
+  }
+  hint.textContent = 'カメラと手の検出を準備しています…';
+  try {
+    if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    await video.play();
+  } catch (err) {
+    hint.textContent = 'カメラを開けませんでした。ブラウザのカメラの許可を確認してください。（' + (err.name || err.message) + '）'; hint.classList.add('err'); return;
+  }
+  try { await ensureModel(); }
+  catch (err) { hint.textContent = '手の検出の部品を読み込めませんでした。ネットにつながっているか確認してください。'; hint.classList.add('err'); }
+  cv.width = video.videoWidth || 1280; cv.height = video.videoHeight || 720; widthCache.clear();
+  live = true; smooth = [];
+  $('cam').textContent = 'カメラを止める';
+  hint.textContent = '両手をカメラに向けて広げてください。指先に糸がかかります。';
+}
+function stopCam() {
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  video.srcObject = null; live = false; lastRes = []; smooth = [];
+  cv.width = 1280; cv.height = 720; widthCache.clear();
+  $('cam').textContent = 'カメラを始める';
+  $('hint').textContent = '今は見本の手で動いています。「カメラを始める」を押すと、自分の手の指先に糸がかかります。';
+}
+$('cam').addEventListener('click', () => live ? stopCam() : startCam());
+$('facing').addEventListener('click', () => {
+  facing = facing === 'user' ? 'environment' : 'user';
+  $('facing').textContent = facing === 'user' ? '外側のカメラに切り替える' : '内側のカメラに切り替える';
+  $('mirror').checked = facing === 'user';
+  if (live) startCam();
+});
+
+async function track() {
+  if (!live || !handsModel || busy || video.readyState < 2) return;
+  busy = true;
+  try { await handsModel.send({ image: video }); } catch (e) {}
+  busy = false;
+}
+
+// landmarks → canvas px, ordered left-to-right on screen, smoothed
+function liveHands() {
+  const W = cv.width, H = cv.height, mir = $('mirror').checked;
+  const hs = lastRes.map(lm => lm.map(p => ({ x: (mir ? 1 - p.x : p.x) * W, y: p.y * H })));
+  hs.sort((a, b) => a[0].x - b[0].x);
+  if (smooth.length !== hs.length) smooth = hs.map(h => h.map(p => ({ ...p })));
+  const k = val.sm / 100;
+  smooth = smooth.map((h, j) => h.map((p, i) => ({ x: p.x * k + hs[j][i].x * (1 - k), y: p.y * k + hs[j][i].y * (1 - k) })));
+  return smooth;
+}
+
+// ---------- render loop ----------
+const ov = document.createElement('canvas'), octx = ov.getContext('2d');
+function drawBackground() {
+  if (live && video.readyState >= 2) {
+    ctx.save();
+    if ($('mirror').checked) { ctx.translate(cv.width, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, 0, 0, cv.width, cv.height); ctx.restore();
+  } else {
+    ctx.fillStyle = '#232426'; ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+}
+function drawHandsOver() {
+  // repaint the hands on top of the "back" letters
+  ov.width = cv.width; ov.height = cv.height;
+  octx.globalCompositeOperation = 'source-over';
+  if (live && video.readyState >= 2) {
+    octx.save(); if ($('mirror').checked) { octx.translate(ov.width, 0); octx.scale(-1, 1); }
+    octx.drawImage(video, 0, 0, ov.width, ov.height); octx.restore();
+  } else { octx.fillStyle = '#8d8a84'; octx.fillRect(0, 0, ov.width, ov.height); }
+  octx.globalCompositeOperation = 'destination-in';
+  octx.imageSmoothingEnabled = true; octx.drawImage(mk, 0, 0, ov.width, ov.height);
+  ctx.drawImage(ov, 0, 0);
+}
+function drawDots(hands) {
+  ctx.fillStyle = '#ff5a36';
+  for (const h of hands) for (const p of h) { ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, 7); ctx.fill(); }
+}
+function drawLine(path) {
+  ctx.strokeStyle = 'rgba(255,90,54,.8)'; ctx.lineWidth = 1.5; ctx.beginPath();
+  path.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke();
+}
+
+const t0 = performance.now();
+function frame() {
+  track();
+  const t = (performance.now() - t0) / 1000;
+  flow += val.spd;
+  const hands = live ? liveHands() : demoHands(t);
+  drawBackground();
+  drawMask(hands);
+  if (!live) drawHandsOver();                   // demo hands need a visible body
+  const an = anchorsFor(hands);
+  if (an) {
+    const path = buildPath(an), run = crossings(path), gs = layoutGlyphs(path, run);
+    drawGlyphs(gs, true);
+    drawHandsOver();
+    drawGlyphs(gs, false);
+    if ($('showLine').checked) drawLine(path);
+  }
+  if ($('dots').checked) drawDots(hands);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- output ----------
+$('save').addEventListener('click', () => {
+  const url = cv.toDataURL('image/png');
+  $('shot').src = url; $('shotdl').href = url; $('shotbox').hidden = false;
+});
+let rec = null, chunks = [];
+$('rec').addEventListener('click', () => {
+  if (rec) { rec.stop(); return; }
+  if (!window.MediaRecorder || !cv.captureStream) { $('recnote').textContent = 'このブラウザでは録画できません。'; return; }
+  const types = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'];
+  const type = types.find(x => MediaRecorder.isTypeSupported(x)) || '';
+  chunks = [];
+  rec = new MediaRecorder(cv.captureStream(30), type ? { mimeType: type, videoBitsPerSecond: 12e6 } : {});
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = () => {
+    const blob = new Blob(chunks, { type: rec.mimeType || 'video/webm' }), url = URL.createObjectURL(blob);
+    $('vid').src = url; $('viddl').href = url;
+    $('viddl').download = 'path-weave-live.' + (blob.type.includes('mp4') ? 'mp4' : 'webm');
+    $('recbox').hidden = false; rec = null;
+    $('rec').textContent = '録画を始める'; $('rec').setAttribute('aria-pressed', 'false');
+  };
+  rec.start(250);
+  $('rec').textContent = '録画を止める'; $('rec').setAttribute('aria-pressed', 'true');
+});
+</script>
+</body>
+</html>
