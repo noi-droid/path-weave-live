@@ -207,13 +207,29 @@ function stepRope(hands) {
   const hk = hooksFor(hands.length);
   if (!hk) { rope = null; return null; }
   const key = $('shape').value + '|' + hands.length;
-  const pegs = hk.refs.map(([h, i]) => pegPoint(hands[h], i));
-  const P = pegs.length, S = hk.closed ? P : P - 1;
-  const chord = k => { const a = pegs[k], b = pegs[(k + 1) % P]; return Math.hypot(b.x - a.x, b.y - a.y); };
+  // each hooked finger gives two points, one on each edge; the string goes round the back of the finger between them
+  const P = hk.refs.length, S = hk.closed ? P : P - 1;
+  const centers = hk.refs.map(([h, i]) => pegPoint(hands[h], i));
+  const hooks = hk.refs.map(([h, i], k) => {
+    const H = hands[h], c = centers[k];
+    const dx = H[i].x - H[i-1].x, dy = H[i].y - H[i-1].y, dl = Math.hypot(dx, dy) || 1;
+    const palm = Math.hypot(H[9].x - H[0].x, H[9].y - H[0].y);
+    const w = palm * 0.24 * val.thk / 100 * 0.62;
+    const nx = -dy / dl, ny = dx / dl;
+    const e1 = { x: c.x + nx * w, y: c.y + ny * w }, e2 = { x: c.x - nx * w, y: c.y - ny * w };
+    const prev = (hk.closed || k > 0) ? centers[(k - 1 + P) % P] : null;
+    const next = (hk.closed || k < P - 1) ? centers[(k + 1) % P] : null;
+    // the string comes in on the side facing the previous finger and leaves on the other side
+    let side = prev ? (prev.x - c.x) * nx + (prev.y - c.y) * ny : -((next.x - c.x) * nx + (next.y - c.y) * ny);
+    return side >= 0 ? { in: e1, out: e2 } : { in: e2, out: e1 };
+  });
+  const pegs = hooks.map(h => h.out);           // start of each free stretch
+  const ends = hooks.map(h => h.in);            // end of each free stretch is the next finger's incoming edge
+  const chord = k => { const a = pegs[k], b = ends[(k + 1) % P]; return Math.hypot(b.x - a.x, b.y - a.y); };
   if (!rope || rope.key !== key) {
     const base = Array.from({ length: S }, (_, k) => chord(k)), sum = base.reduce((a, b) => a + b, 0) || 1;
     rope = { key, base: sum, segs: base.map((c, k) => {
-      const a = pegs[k], b = pegs[(k + 1) % P], pts = [];
+      const a = pegs[k], b = ends[(k + 1) % P], pts = [];
       for (let j = 1; j <= NP; j++) { const t = j / (NP + 1); const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t; pts.push({ x, y, ox: x, oy: y }); }
       return { l: c * val.len / 100, pts };
     }) };
@@ -244,7 +260,7 @@ function stepRope(hands) {
   // a string can go slack but cannot stretch: only pull points together when too far apart
   for (let it = 0; it < 24; it++) {
     for (let k = 0; k < S; k++) {
-      const s = segs[k], a = pegs[k], b = pegs[(k + 1) % P], r = s.l / (NP + 1);
+      const s = segs[k], a = pegs[k], b = ends[(k + 1) % P], r = s.l / (NP + 1);
       const node = j => j === 0 ? a : j === NP + 1 ? b : s.pts[j - 1];
       for (let j = 0; j <= NP; j++) {
         const p = node(j), q = node(j + 1), dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy);
@@ -256,12 +272,17 @@ function stepRope(hands) {
     }
   }
   // path through the fingers and the free points, remembering where each finger sits on it
-  const pts = [], pegIdx = [];
-  for (let k = 0; k < S; k++) { pegIdx.push(pts.length); pts.push({ x: pegs[k].x, y: pegs[k].y }); for (const p of segs[k].pts) pts.push({ x: p.x, y: p.y }); }
-  pegIdx.push(pts.length); pts.push(hk.closed ? { ...pegs[0] } : { ...pegs[P - 1] });
+  const pts = [], wrap = [];
+  const around = h => { for (let j = 0; j <= 6; j++) { const t = j / 6; pts.push({ x: h.in.x + (h.out.x - h.in.x) * t, y: h.in.y + (h.out.y - h.in.y) * t }); wrap.push(j < 6); } };
+  for (let k = 0; k < S; k++) {
+    around(hooks[k]);
+    for (const p of segs[k].pts) { pts.push({ x: p.x, y: p.y }); wrap.push(false); }
+  }
+  if (hk.closed) { pts.push({ ...hooks[0].in }); wrap.push(false); }
+  else around(hooks[P - 1]);
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i-1] + Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y));
-  return { pts, cum, L: cum[cum.length - 1], pegIdx };
+  return { pts, cum, L: cum[cum.length - 1], wrap };
 }
 
 function idxAt(cum, s) { let lo = 0, hi = cum.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (cum[m] <= s) lo = m; else hi = m - 1; } return lo; }
@@ -326,16 +347,8 @@ function layoutGlyphs(path, run) {
     if (c >= 0 && c <= L && ch !== ' ') {
       const p = pointAt(path, c), r = run[p.i];
       let back = false;
-      if (r >= 0) {
-        if (mode === 'back') back = true;
-        else if (mode === 'alt') back = r % 2 === 0;
-        else if (mode === 'wrap') {
-          // over a hooked finger: the string comes in on the palm side and leaves round the back
-          let best = -1, bd = Infinity;
-          for (const pi of path.pegIdx) if (run[pi] === r && Math.abs(pi - p.i) < bd) { bd = Math.abs(pi - p.i); best = pi; }
-          back = best >= 0 && p.i >= best;
-        }
-      }
+      if (mode === 'wrap') back = path.wrap[p.i];          // only the part going round the back of a hooked finger is hidden
+      else if (r >= 0) back = mode === 'back' || (mode === 'alt' && r % 2 === 0);
       out.push({ ch, x: p.x, y: p.y, a: p.a, w, back });
     }
     pos += w; ci++; used++;
