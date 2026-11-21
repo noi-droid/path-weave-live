@@ -371,17 +371,26 @@ const video = document.createElement('video'); video.playsInline = true; video.m
 let live = false, facing = 'user', handsModel = null, busy = false, lastRes = [], smooth = [];
 // a still photo can stand in for the camera: the hands are found once, the string keeps moving
 let still = null, stillTries = 0;
+// the detector gets a smaller copy: very large photos (e.g. 7000 px) are too big for it to read
+const stillSmall = document.createElement('canvas');
 const srcEl = () => still || video;
 const srcReady = () => still ? still.complete && still.naturalWidth > 0 : video.readyState >= 2;
 
 function loadScript(src) { return new Promise((ok, ng) => { const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous'; s.onload = ok; s.onerror = () => ng(new Error('load ' + src)); document.head.appendChild(s); }); }
-async function ensureModel() {
-  if (handsModel) return;
-  await loadScript(HANDS_BASE + 'hands.js');
-  handsModel = new Hands({ locateFile: f => HANDS_BASE + f });
-  handsModel.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
-  handsModel.onResults(r => { lastRes = r.multiHandLandmarks || []; });
-  await handsModel.initialize();
+// The model is only handed out once it has finished starting up: sending it an image
+// while it is still initialising breaks the start-up (it never recovers).
+let modelLoading = null;
+function ensureModel() {
+  if (handsModel) return Promise.resolve();
+  if (!modelLoading) modelLoading = (async () => {
+    if (typeof Hands === 'undefined') await loadScript(HANDS_BASE + 'hands.js');
+    const m = new Hands({ locateFile: f => HANDS_BASE + f });
+    m.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    m.onResults(r => { lastRes = r.multiHandLandmarks || []; });
+    await m.initialize();
+    handsModel = m;
+  })().catch(err => { modelLoading = null; throw err; });
+  return modelLoading;
 }
 async function startCam() {
   const hint = $('hint'); hint.classList.remove('err');
@@ -414,7 +423,10 @@ async function loadStill(file) {
   const img = new Image();
   img.src = URL.createObjectURL(file);
   try { await img.decode(); } catch (e) { hint.textContent = 'この画像は読み込めませんでした。'; hint.classList.add('err'); return; }
-  clearStill(); still = img; stillTries = 0;
+  clearStill(); still = img; stillTries = 0; stillDone = false;
+  const ks = Math.min(1, 1280 / Math.max(img.naturalWidth, img.naturalHeight));
+  stillSmall.width = Math.round(img.naturalWidth * ks); stillSmall.height = Math.round(img.naturalHeight * ks);
+  stillSmall.getContext('2d').drawImage(img, 0, 0, stillSmall.width, stillSmall.height);
   // keep the photo's own resolution (up to 2400 px on the long side) so saved images stay sharp
   const k = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
   cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k); widthCache.clear();
@@ -445,14 +457,31 @@ $('facing').addEventListener('click', () => {
 
 async function track() {
   if (!live || !handsModel || busy || !srcReady()) return;
-  if (still) {
-    if (lastRes.length >= 2 || stillTries >= 6) return;
-    stillTries++;
-  }
+  if (still) { if (!stillDone) { busy = true; await findStillHands(); busy = false; } return; }
   busy = true;
-  try { await handsModel.send({ image: srcEl() }); } catch (e) {}
+  try { await handsModel.send({ image: video }); } catch (e) {}
   busy = false;
-  if (still && (lastRes.length >= 2 || stillTries >= 6)) {
+}
+// A photo is searched whole, then left half and right half (the detector tends to stop
+// after one hand in a still), and the hands found are merged.
+let stillDone = false;
+async function findStillHands() {
+  const W = stillSmall.width, H = stillSmall.height, crop = document.createElement('canvas');
+  const views = [[0, 0, W, H], [0, 0, Math.round(W * 0.6), H], [Math.round(W * 0.4), 0, W - Math.round(W * 0.4), H]];
+  const found = [];
+  for (const [x, y, w, h] of views) {
+    crop.width = w; crop.height = h; crop.getContext('2d').drawImage(stillSmall, x, y, w, h, 0, 0, w, h);
+    try { handsModel.reset(); } catch (e) {}
+    for (let k = 0; k < 2; k++) { try { await handsModel.send({ image: crop }); } catch (e) {} }
+    for (const lm of lastRes) {
+      const hand = lm.map(p => ({ x: (x + p.x * w) / W, y: (y + p.y * h) / H, z: p.z }));
+      // the same hand seen in two views: keep one
+      if (!found.some(f => Math.hypot(f[0].x - hand[0].x, f[0].y - hand[0].y) < 0.08)) found.push(hand);
+    }
+    if (found.length >= 2) break;
+  }
+  lastRes = found.slice(0, 2); stillDone = true; stillTries = 6;
+  {
     const n = lastRes.length;
     $('hint').textContent = n === 0 ? '写真の中に手が見つかりませんでした。手がはっきり大きく写った写真で試してください。'
       : n === 1 ? '手が1つだけ見つかりました。片手用のかけ方で糸をかけています。'
