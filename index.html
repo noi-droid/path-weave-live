@@ -65,6 +65,7 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
       <div class="btns">
         <button class="primary" id="cam">カメラを始める</button>
         <button id="facing">外側のカメラに切り替える</button>
+        <button id="stillBtn">写真から</button><input type="file" id="stillFile" accept="image/*" hidden>
       </div>
       <label class="row"><span><input type="checkbox" id="mirror" checked> 鏡のように左右を反転する</span></label>
       <label class="row"><span><input type="checkbox" id="dots"> 手の点を表示</span></label>
@@ -368,6 +369,10 @@ function drawGlyphs(gs, back) {
 // ---------- camera + hand tracking ----------
 const video = document.createElement('video'); video.playsInline = true; video.muted = true;
 let live = false, facing = 'user', handsModel = null, busy = false, lastRes = [], smooth = [];
+// a still photo can stand in for the camera: the hands are found once, the string keeps moving
+let still = null, stillTries = 0;
+const srcEl = () => still || video;
+const srcReady = () => still ? still.complete && still.naturalWidth > 0 : video.readyState >= 2;
 
 function loadScript(src) { return new Promise((ok, ng) => { const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous'; s.onload = ok; s.onerror = () => ng(new Error('load ' + src)); document.head.appendChild(s); }); }
 async function ensureModel() {
@@ -386,6 +391,7 @@ async function startCam() {
   hint.textContent = 'カメラと手の検出を準備しています…';
   try {
     if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+    clearStill();
     video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
     await video.play();
   } catch (err) {
@@ -398,14 +404,38 @@ async function startCam() {
   $('cam').textContent = 'カメラを止める';
   hint.textContent = '両手をカメラに向けて広げてください。指先に糸がかかります。';
 }
+function clearStill() {
+  if (!still) return;
+  URL.revokeObjectURL(still.src); still = null; $('stillBtn').textContent = '写真から';
+}
+async function loadStill(file) {
+  const hint = $('hint'); hint.classList.remove('err');
+  if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+  const img = new Image();
+  img.src = URL.createObjectURL(file);
+  try { await img.decode(); } catch (e) { hint.textContent = 'この画像は読み込めませんでした。'; hint.classList.add('err'); return; }
+  clearStill(); still = img; stillTries = 0;
+  // keep the photo's own resolution (up to 2400 px on the long side) so saved images stay sharp
+  const k = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
+  cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k); widthCache.clear();
+  $('mirror').checked = false;
+  live = true; lastRes = []; smooth = []; resetRope();
+  $('cam').textContent = 'カメラを始める'; $('stillBtn').textContent = '写真をやめる';
+  hint.textContent = '写真の中の手を探しています…';
+  try { await ensureModel(); }
+  catch (err) { hint.textContent = '手の検出の部品を読み込めませんでした。ネットにつながっているか確認してください。'; hint.classList.add('err'); }
+}
+$('stillBtn').addEventListener('click', () => { if (still) stopCam(); else $('stillFile').click(); });
+$('stillFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadStill(f); });
 function stopCam() {
   if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  clearStill();
   video.srcObject = null; live = false; lastRes = []; smooth = []; resetRope();
   cv.width = 1280; cv.height = 720; widthCache.clear();
   $('cam').textContent = 'カメラを始める';
   $('hint').textContent = '今は見本の手で動いています。「カメラを始める」を押すと、自分の手の指先に糸がかかります。';
 }
-$('cam').addEventListener('click', () => live ? stopCam() : startCam());
+$('cam').addEventListener('click', () => live && !still ? stopCam() : startCam());
 $('facing').addEventListener('click', () => {
   facing = facing === 'user' ? 'environment' : 'user';
   $('facing').textContent = facing === 'user' ? '外側のカメラに切り替える' : '内側のカメラに切り替える';
@@ -414,10 +444,20 @@ $('facing').addEventListener('click', () => {
 });
 
 async function track() {
-  if (!live || !handsModel || busy || video.readyState < 2) return;
+  if (!live || !handsModel || busy || !srcReady()) return;
+  if (still) {
+    if (lastRes.length >= 2 || stillTries >= 6) return;
+    stillTries++;
+  }
   busy = true;
-  try { await handsModel.send({ image: video }); } catch (e) {}
+  try { await handsModel.send({ image: srcEl() }); } catch (e) {}
   busy = false;
+  if (still && (lastRes.length >= 2 || stillTries >= 6)) {
+    const n = lastRes.length;
+    $('hint').textContent = n === 0 ? '写真の中に手が見つかりませんでした。手がはっきり大きく写った写真で試してください。'
+      : n === 1 ? '手が1つだけ見つかりました。片手用のかけ方で糸をかけています。'
+      : '両手が見つかりました。指先に糸がかかります。';
+  }
 }
 
 // landmarks → canvas px, ordered left-to-right on screen, smoothed
@@ -434,10 +474,10 @@ function liveHands() {
 // ---------- render loop ----------
 const ov = document.createElement('canvas'), octx = ov.getContext('2d');
 function drawBackground() {
-  if (live && video.readyState >= 2) {
+  if (live && srcReady()) {
     ctx.save();
     if ($('mirror').checked) { ctx.translate(cv.width, 0); ctx.scale(-1, 1); }
-    ctx.drawImage(video, 0, 0, cv.width, cv.height); ctx.restore();
+    ctx.drawImage(srcEl(), 0, 0, cv.width, cv.height); ctx.restore();
   } else {
     ctx.fillStyle = '#232426'; ctx.fillRect(0, 0, cv.width, cv.height);
   }
@@ -446,9 +486,9 @@ function drawHandsOver() {
   // repaint the hands on top of the "back" letters
   ov.width = cv.width; ov.height = cv.height;
   octx.globalCompositeOperation = 'source-over';
-  if (live && video.readyState >= 2) {
+  if (live && srcReady()) {
     octx.save(); if ($('mirror').checked) { octx.translate(ov.width, 0); octx.scale(-1, 1); }
-    octx.drawImage(video, 0, 0, ov.width, ov.height); octx.restore();
+    octx.drawImage(srcEl(), 0, 0, ov.width, ov.height); octx.restore();
   } else { octx.fillStyle = '#8d8a84'; octx.fillRect(0, 0, ov.width, ov.height); }
   octx.globalCompositeOperation = 'destination-in';
   octx.imageSmoothingEnabled = true; octx.drawImage(mk, 0, 0, ov.width, ov.height);
