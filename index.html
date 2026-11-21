@@ -110,12 +110,15 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
     </fieldset>
 
     <fieldset><legend>Output</legend>
-      <div class="btns"><button class="primary" id="rec" aria-pressed="false">録画を始める</button><button id="save">画像にする</button></div>
+      <div class="btns"><button class="primary" id="rec" aria-pressed="false">録画を始める</button><button id="save">画像にする</button><button id="saveSvg">SVGにする</button></div>
+      <label class="row"><span><input type="checkbox" id="svgPhoto" checked> SVGに背景の映像（写真）を入れる</span></label>
+      <p class="note">SVGは押した瞬間の形を書き出します。書体ファイルを読み込んでいるときは文字をアウトライン（パス）で、それ以外はテキストのまま書き出します。手の後ろを通る文字は「back」、手前は「front」のグループで、backは手の形のマスクで隠れます。</p>
       <p class="note" id="recnote">点や線の表示は、オンにしていると絵と録画にも入ります。</p>
     </fieldset>
   </div>
 </div>
 
+<script src="opentype.min.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -147,10 +150,16 @@ $('rehook').addEventListener('click', resetRope);
 
 // ---------- font ----------
 let family = '"Helvetica Neue",Helvetica,Arial,"Hiragino Sans",sans-serif';
+// the font file is also read as outlines, so the SVG keeps the letter shapes without the font installed
+let otFont = null, fontName = '';
+function fontNames(f) { const n = f.names.windows || f.names.macintosh || f.names.unicode || {}; const g = k => n[k] && (n[k].en || Object.values(n[k])[0]); return { family: g('fontFamily') || '' }; }
 $('font').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
-    const ff = new FontFace('PWUser', await f.arrayBuffer(), { weight: '1 1000' });
+    const buf = await f.arrayBuffer();
+    try { otFont = window.opentype ? opentype.parse(buf.slice(0)) : null; } catch (e2) { otFont = null; }
+    fontName = (otFont && fontNames(otFont).family) || f.name.replace(/\.[^.]+$/, '');
+    const ff = new FontFace('PWUser', buf, { weight: '1 1000' });
     await ff.load(); document.fonts.add(ff);
     family = '"PWUser",' + family; widthCache.clear();
     $('fontnote').textContent = f.name + ' を使っています。';
@@ -546,6 +555,7 @@ function drawLine(path) {
   path.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke();
 }
 
+let lastGs = [];   // the letters of the last frame, for the SVG
 const t0 = performance.now();
 function frame() {
   track();
@@ -558,6 +568,7 @@ function frame() {
   const path = stepRope(hands);
   if (path) {
     const run = crossings(path), gs = layoutGlyphs(path, run);
+    lastGs = gs;
     drawGlyphs(gs, true);
     drawHandsOver();
     drawGlyphs(gs, false);
@@ -572,6 +583,63 @@ requestAnimationFrame(frame);
 $('save').addEventListener('click', () => {
   const url = cv.toDataURL('image/png');
   $('shot').src = url; $('shotdl').href = url; $('shotbox').hidden = false;
+});
+// SVG: background (optional), letters behind the hands (hidden by the hand shape), letters in front
+// one letter's outline: a variable font at the current weight; every contour closed
+// (CFF outlines come without closePath, which leaves open paths in Illustrator)
+function glyphD(ch, x, y, size, wght) {
+  const opt = { kerning: false }, ax = otFont.tables.fvar && otFont.tables.fvar.axes.find(a => a.tag === 'wght');
+  if (ax) opt.variation = { wght: Math.max(ax.minValue, Math.min(ax.maxValue, wght)) };
+  const f = v => Math.round(v * 100) / 100; let d = '', open = false; const close = () => { if (open) d += 'Z'; open = false; };
+  for (const c of otFont.getPath(ch, x, y, size, opt).commands) {
+    if (c.type === 'M') { close(); d += `M${f(c.x)} ${f(c.y)}`; open = true; }
+    else if (c.type === 'L') d += `L${f(c.x)} ${f(c.y)}`;
+    else if (c.type === 'Q') d += `Q${f(c.x1)} ${f(c.y1)} ${f(c.x)} ${f(c.y)}`;
+    else if (c.type === 'C') d += `C${f(c.x1)} ${f(c.y1)} ${f(c.x2)} ${f(c.y2)} ${f(c.x)} ${f(c.y)}`;
+    else if (c.type === 'Z') close();
+  }
+  close(); return d;
+}
+function buildSvg() {
+  const W = cv.width, H = cv.height, r2 = v => Math.round(v * 100) / 100;
+  const esc = c => c.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // hand shape -> black, everything else white: back letters show only where it is white
+  const m = document.createElement('canvas'); m.width = W; m.height = H; const mx = m.getContext('2d');
+  mx.fillStyle = '#fff'; mx.fillRect(0, 0, W, H);
+  const hand = document.createElement('canvas'); hand.width = W; hand.height = H; const hx = hand.getContext('2d');
+  hx.drawImage(mk, 0, 0, W, H); hx.globalCompositeOperation = 'source-in'; hx.fillStyle = '#000'; hx.fillRect(0, 0, W, H);
+  mx.drawImage(hand, 0, 0);
+  const o = [`<?xml version="1.0" encoding="UTF-8"?>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`,
+    `<defs><mask id="behind" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}"><image width="${W}" height="${H}" xlink:href="${m.toDataURL('image/png')}"/></mask></defs>`];
+  if ($('svgPhoto').checked && live && srcReady()) {
+    const bg = document.createElement('canvas'); bg.width = W; bg.height = H; const bx = bg.getContext('2d');
+    if ($('mirror').checked) { bx.translate(W, 0); bx.scale(-1, 1); }
+    bx.drawImage(srcEl(), 0, 0, W, H);
+    o.push(`<image id="background" width="${W}" height="${H}" xlink:href="${bg.toDataURL('image/jpeg', 0.92)}"/>`);
+  }
+  // canvas centres each letter vertically on the string; SVG needs the baseline, so measure the offset
+  ctx.font = fontStr();
+  ctx.textBaseline = 'alphabetic'; const a1 = ctx.measureText('H').actualBoundingBoxAscent;
+  ctx.textBaseline = 'middle'; const a2 = ctx.measureText('H').actualBoundingBoxAscent;
+  const drop = r2(a1 - a2), fam = fontName ? `'${fontName}', sans-serif` : "'Helvetica Neue', Helvetica, Arial, sans-serif";
+  const style = `font-family:${fam};font-size:${val.size}px;font-weight:${val.wgt};font-variation-settings:'wght' ${val.wgt}`;
+  const g2 = { back: [], front: [] };
+  for (const g of lastGs) if (g.ch.trim()) {
+    const tf = `translate(${r2(g.x)} ${r2(g.y)}) rotate(${r2(g.a * 180 / Math.PI)})`;
+    (g.back ? g2.back : g2.front).push(otFont
+      ? `<path transform="${tf}" d="${glyphD(g.ch, -val.trk / 2 - ctx.measureText(g.ch).width / 2, drop, val.size, val.wgt)}"/>`
+      : `<text transform="${tf}" x="${r2(-val.trk / 2)}" y="${drop}" text-anchor="middle">${esc(g.ch)}</text>`);
+  }
+  o.push(`<g id="back" mask="url(#behind)" fill="${col.value}" style="${style}">`, ...g2.back, `</g>`,
+    `<g id="front" fill="${col.value}" style="${style}">`, ...g2.front, `</g>`, `</svg>`);
+  return o.join('\n');
+}
+$('saveSvg').addEventListener('click', () => {
+  const blob = new Blob([buildSvg()], { type: 'image/svg+xml' }), url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = `path-weave-live-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}.svg`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 });
 let rec = null, chunks = [];
 $('rec').addEventListener('click', () => {
