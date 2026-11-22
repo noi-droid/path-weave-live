@@ -60,7 +60,7 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
 
   <div class="side">
     <h1>Path Weave Live</h1>
-    <p class="ver" style="margin:-6px 0 8px;font-size:11px;opacity:.5">版 2026-11-21c</p>
+    <p class="ver" style="margin:-6px 0 8px;font-size:11px;opacity:.5">版 2026-11-22a</p>
 
     <fieldset><legend>Camera</legend>
       <div class="btns">
@@ -112,13 +112,14 @@ button:focus-visible,a.btn:focus-visible,textarea:focus-visible,input:focus-visi
     <fieldset><legend>Output</legend>
       <div class="btns"><button class="primary" id="rec" aria-pressed="false">録画を始める</button><button id="save">画像にする</button><button id="saveSvg">SVGにする</button></div>
       <label class="row"><span><input type="checkbox" id="svgPhoto" checked> SVGに背景の映像（写真）を入れる</span></label>
-      <p class="note">SVGは押した瞬間の形を書き出します。書体ファイルを読み込んでいるときは文字をアウトライン（パス）で、それ以外はテキストのまま書き出します。手の後ろを通る文字は「back」、手前は「front」のグループで、backは手の形のマスクで隠れます。</p>
+      <p class="note">SVGは押した瞬間の形を書き出します。書体ファイルを読み込んでいるときは文字をアウトライン（パス）で、それ以外はテキストのまま書き出します。手の後ろを通る文字は「back」、手前は「front」のグループです。書体ファイルがあるときは、backの文字から手に隠れる部分を切り取って書き出します（隠れた部分は残りません）。テキストのままのときは切り取れないので、手の形のマスクで隠します。</p>
       <p class="note" id="recnote">点や線の表示は、オンにしていると絵と録画にも入ります。</p>
     </fieldset>
   </div>
 </div>
 
 <script src="opentype.min.js"></script>
+<script src="paper-core.min.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -555,13 +556,14 @@ function drawLine(path) {
   path.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke();
 }
 
-let lastGs = [];   // the letters of the last frame, for the SVG
+let lastGs = [], lastHands = [];   // the letters and hands of the last frame, for the SVG
 const t0 = performance.now();
 function frame() {
   track();
   const t = (performance.now() - t0) / 1000;
   flow += val.spd;
   const hands = live ? liveHands() : demoHands(t);
+  lastHands = hands;
   drawBackground();
   drawMask(hands);
   if (!live) drawHandsOver();                   // demo hands need a visible body
@@ -600,18 +602,44 @@ function glyphD(ch, x, y, size, wght) {
   }
   close(); return d;
 }
+// the hand as vector shapes, the same ones drawMask() paints: the palm polygon and every bone as a round-capped line
+function handShapes(hands) {
+  return hands.map(h => {
+    const palm = Math.hypot(h[9].x - h[0].x, h[9].y - h[0].y);
+    return { palm: PALM.map(k => h[k]), bones: BONES.map(([a, b]) => [h[a], h[b]]), r: palm * 0.24 * val.thk / 100 / 2 };
+  });
+}
+// one shape for all hands (paper.js), to cut away the parts of the back letters that the hands cover
+let paperReady = false;
+function handUnion(hands) {
+  if (!window.paper) return null;
+  if (!paperReady) { paper.setup(new paper.Size(1, 1)); paperReady = true; }
+  let u = null;
+  const add = it => { if (!u) { u = it; return; } const n = u.unite(it, { insert: false }); u.remove(); it.remove(); u = n; };
+  for (const H of handShapes(hands)) {
+    add(new paper.Path({ segments: H.palm.map(p => [p.x, p.y]), closed: true, insert: false }));
+    for (const [a, b] of H.bones) {
+      const dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx, dy) || 1, nx = -dy / l * H.r, ny = dx / l * H.r;
+      add(new paper.Path({ segments: [[a.x + nx, a.y + ny], [b.x + nx, b.y + ny], [b.x - nx, b.y - ny], [a.x - nx, a.y - ny]], closed: true, insert: false }));
+      add(new paper.Path.Circle({ center: [a.x, a.y], radius: H.r, insert: false }));
+      add(new paper.Path.Circle({ center: [b.x, b.y], radius: H.r, insert: false }));
+    }
+  }
+  return u;
+}
 function buildSvg() {
   const W = cv.width, H = cv.height, r2 = v => Math.round(v * 100) / 100;
   const esc = c => c.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  // hand shape -> black, everything else white: back letters show only where it is white
-  const m = document.createElement('canvas'); m.width = W; m.height = H; const mx = m.getContext('2d');
-  mx.fillStyle = '#fff'; mx.fillRect(0, 0, W, H);
-  const hand = document.createElement('canvas'); hand.width = W; hand.height = H; const hx = hand.getContext('2d');
-  hx.drawImage(mk, 0, 0, W, H); hx.globalCompositeOperation = 'source-in'; hx.fillStyle = '#000'; hx.fillRect(0, 0, W, H);
-  mx.drawImage(hand, 0, 0);
+  // with a font file the back letters are cut by the hand shape, so nothing hidden is written;
+  // as live text they can't be cut, so a vector mask hides them instead (hand = black)
+  const cut = otFont ? handUnion(lastHands) : null;
+  const vm = handShapes(lastHands).map(Hs =>
+    `<polygon points="${Hs.palm.map(p => r2(p.x) + ',' + r2(p.y)).join(' ')}" fill="#000"/>` +
+    `<path d="${Hs.bones.map(([a, b]) => `M${r2(a.x)} ${r2(a.y)}L${r2(b.x)} ${r2(b.y)}`).join('')}" fill="none" stroke="#000" stroke-width="${r2(Hs.r * 2)}" stroke-linecap="round" stroke-linejoin="round"/>`).join('');
   const o = [`<?xml version="1.0" encoding="UTF-8"?>`,
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`,
-    `<defs><mask id="behind" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}"><image width="${W}" height="${H}" xlink:href="${m.toDataURL('image/png')}"/></mask></defs>`];
+  ];
+  if (!otFont) o.push(`<defs><mask id="behind" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="#fff"/>${vm}</mask></defs>`);
   if ($('svgPhoto').checked && live && srcReady()) {
     const bg = document.createElement('canvas'); bg.width = W; bg.height = H; const bx = bg.getContext('2d');
     if ($('mirror').checked) { bx.translate(W, 0); bx.scale(-1, 1); }
@@ -627,11 +655,20 @@ function buildSvg() {
   const g2 = { back: [], front: [] };
   for (const g of lastGs) if (g.ch.trim()) {
     const tf = `translate(${r2(g.x)} ${r2(g.y)}) rotate(${r2(g.a * 180 / Math.PI)})`;
-    (g.back ? g2.back : g2.front).push(otFont
-      ? `<path transform="${tf}" d="${glyphD(g.ch, -val.trk / 2 - ctx.measureText(g.ch).width / 2, drop, val.size, val.wgt)}"/>`
-      : `<text transform="${tf}" x="${r2(-val.trk / 2)}" y="${drop}" text-anchor="middle">${esc(g.ch)}</text>`);
+    if (otFont) {
+      const d = glyphD(g.ch, -val.trk / 2 - ctx.measureText(g.ch).width / 2, drop, val.size, val.wgt);
+      if (g.back && cut) {
+        // place the letter, then take the hand away from it
+        const gp = new paper.CompoundPath({ pathData: d, insert: false });
+        gp.rotate(g.a * 180 / Math.PI, new paper.Point(0, 0)); gp.translate(new paper.Point(g.x, g.y));
+        const rest = gp.subtract(cut, { insert: false }); gp.remove();
+        const rd = rest.pathData; rest.remove();
+        if (rd) g2.back.push(`<path d="${rd}"/>`);
+      } else (g.back ? g2.back : g2.front).push(`<path transform="${tf}" d="${d}"/>`);
+    } else (g.back ? g2.back : g2.front).push(`<text transform="${tf}" x="${r2(-val.trk / 2)}" y="${drop}" text-anchor="middle">${esc(g.ch)}</text>`);
   }
-  o.push(`<g id="back" mask="url(#behind)" fill="${col.value}" style="${style}">`, ...g2.back, `</g>`,
+  if (cut) cut.remove();
+  o.push(`<g id="back"${otFont ? '' : ' mask="url(#behind)"'} fill="${col.value}" style="${style}">`, ...g2.back, `</g>`,
     `<g id="front" fill="${col.value}" style="${style}">`, ...g2.front, `</g>`, `</svg>`);
   return o.join('\n');
 }
